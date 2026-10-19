@@ -626,6 +626,16 @@ var tokenTests = []tokenTest{
 		`<p a=/>`,
 		`<p a="/">`,
 	},
+	{
+		"duplicate attributes",
+		`<p foo="bar" foo="baz">`,
+		`<p foo="bar">`,
+	},
+	{
+		"duplicate attributes, different case",
+		`<p FOO="bar" foo="baz">`,
+		`<p foo="bar">`,
+	},
 }
 
 func TestTokenizer(t *testing.T) {
@@ -933,3 +943,59 @@ func benchmarkTokenizer(b *testing.B, level int) {
 func BenchmarkRawLevelTokenizer(b *testing.B)  { benchmarkTokenizer(b, rawLevel) }
 func BenchmarkLowLevelTokenizer(b *testing.B)  { benchmarkTokenizer(b, lowLevel) }
 func BenchmarkHighLevelTokenizer(b *testing.B) { benchmarkTokenizer(b, highLevel) }
+
+func TestUnicodeAttributeCase(t *testing.T) {
+	// <div a="1" A="1"> is resolved to <div a="1"> because a and A are considered
+	// duplicate attribute names. Different unicode cases are not considered equal
+	// though, so <div ä="1" Ä="1"> is tokenized as <div ä="1" Ä="1">.
+	f := `<div ä="1" Ä="1">`
+	z := NewTokenizer(strings.NewReader(f))
+	if tt := z.Next(); tt != StartTagToken {
+		t.Fatalf("expected StartTagToken, got %s", tt)
+	}
+	tok := z.Token()
+	if len(tok.Attr) != 2 {
+		t.Fatalf("expected 2 attributes, got %d", len(tok.Attr))
+	}
+	if tok.Attr[0].Key != "ä" {
+		t.Errorf("expected attribute key to be 'ä', got %s", tok.Attr[0].Key)
+	}
+	if tok.Attr[1].Key != "Ä" {
+		t.Errorf("expected attribute key to be 'Ä', got %s", tok.Attr[1].Key)
+	}
+}
+
+func TestParseDuplicateAttributes(t *testing.T) {
+	// Duplicate attributes (compared ASCII case-insensitively) must be dropped
+	// so that only the first occurrence reaches the parsed tree and the
+	// rendered output, matching how browsers resolve them.
+	src := `<a href="https://example.com/" HREF="javascript:alert(1)" href="javascript:alert(2)">x</a>`
+	doc, err := Parse(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	var a *Node
+	var find func(*Node)
+	find = func(n *Node) {
+		if a == nil && n.Type == ElementNode && n.Data == "a" {
+			a = n
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			find(c)
+		}
+	}
+	find(doc)
+	if a == nil {
+		t.Fatal("no <a> element found")
+	}
+	if len(a.Attr) != 1 || a.Attr[0].Key != "href" || a.Attr[0].Val != "https://example.com/" {
+		t.Fatalf("got attributes %v, want only href=%q", a.Attr, "https://example.com/")
+	}
+	var buf bytes.Buffer
+	if err := Render(&buf, a); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if got, want := buf.String(), `<a href="https://example.com/">x</a>`; got != want {
+		t.Errorf("rendered %q, want %q", got, want)
+	}
+}
