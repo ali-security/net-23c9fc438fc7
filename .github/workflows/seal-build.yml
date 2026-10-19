@@ -1,0 +1,69 @@
+name: seal-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Go test names to run (space-separated; empty runs the full suite)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: false
+      - name: Go version
+        run: go version
+      - name: Build module zip helper
+        run: |
+          set -eux
+          HELPER=$(mktemp -d)
+          cp "$GITHUB_WORKSPACE/.github/create_mod.go" "$HELPER/main.go"
+          cd "$HELPER"
+          go mod init example.com/mod
+          go get golang.org/x/mod@v0.28.0
+          go build -o "$RUNNER_TEMP/create_mod" .
+      - name: Create module zip
+        run: |
+          set -eux
+          mkdir -p "$RUNNER_TEMP/src" "$RUNNER_TEMP/out"
+          # Zip a copy of the tree without the seal-added .github (upstream ships none)
+          cp -a "$GITHUB_WORKSPACE/." "$RUNNER_TEMP/src/"
+          rm -rf "$RUNNER_TEMP/src/.github"
+          "$RUNNER_TEMP/create_mod" golang.org/x/net v0.45.0 "$RUNNER_TEMP/src" "$RUNNER_TEMP/out/v0.45.0.zip"
+          unzip -l "$RUNNER_TEMP/out/v0.45.0.zip" | tail -1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: module-zip
+          path: ${{ runner.temp }}/out/v0.45.0.zip
+          if-no-files-found: error
+      - name: Build
+        run: |
+          set -eux
+          go mod download
+          go build ./...
+      - name: Test
+        env:
+          TEST_FILTER: ${{ inputs.test-filter }}
+        run: |
+          set -eo pipefail
+          if [ -n "$TEST_FILTER" ]; then
+            go test -v -run "^($(echo "$TEST_FILTER" | tr ' ' '|'))$" ./... 2>&1 | tee "$RUNNER_TEMP/scoped.log"
+            for t in $TEST_FILTER; do grep -qE "^=== RUN[[:space:]]+${t}(/|$)" "$RUNNER_TEMP/scoped.log" || { echo "selected test $t did not run"; exit 1; }; done
+          else
+            go test -v ./... 2>&1 | tee "$RUNNER_TEMP/full.log"
+          fi
+          LOG="$RUNNER_TEMP/full.log"
+          if [ -n "$TEST_FILTER" ]; then LOG="$RUNNER_TEMP/scoped.log"; fi
+          awk '/--- PASS/{p++} /--- FAIL/{f++} /--- SKIP/{s++} /^ok /{k++} END{printf "TEST SUMMARY: %d passed, %d failed, %d skipped; packages ok: %d\n", p, f, s, k}' "$LOG"
