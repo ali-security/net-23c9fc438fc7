@@ -104,5 +104,72 @@ func TestIDNASeparators(t *testing.T) {
 	}
 }
 
-// TODO(nigeltao): test errors, once we've specified when ToASCII and ToUnicode
-// return errors.
+func TestIDNAErrors(t *testing.T) {
+	for _, tc := range []string{
+		"xn--example-.com",
+	} {
+		if got, err := ToASCII(tc); err == nil {
+			t.Errorf("ToASCII(%q) = %q, want error", tc, got)
+		}
+		if got, err := ToUnicode(tc); err == nil {
+			t.Errorf("ToUnicode(%q) = %q, want error", tc, got)
+		}
+	}
+}
+
+// TestIDNAErrorsASCIIPunycodeProfiles checks that xn-- labels which decode to
+// an all-ASCII label are rejected by every profile, so that a name such as
+// "xn--example-.com" cannot be turned into "example.com" without an error.
+func TestIDNAErrorsASCIIPunycodeProfiles(t *testing.T) {
+	profiles := []struct {
+		name    string
+		profile *Profile
+	}{
+		{"Punycode", Punycode},
+		{"Lookup", Lookup},
+		{"Display", Display},
+		{"Registration", Registration},
+		{"New", New()},
+		{"ValidateForRegistration", New(ValidateForRegistration())},
+	}
+	inputs := []string{
+		"xn--example-.com",
+		"www.xn--example-.com",
+		"xn--example-.xn--bcher-kva.de",
+		"xn--a-",
+		"xn--Example-.com",
+	}
+	for _, p := range profiles {
+		t.Run(p.name, func(t *testing.T) {
+			for _, in := range inputs {
+				if got, err := p.profile.ToASCII(in); err == nil {
+					t.Errorf("%s.ToASCII(%q) = %q, want error", p.name, in, got)
+				}
+				if got, err := p.profile.ToUnicode(in); err == nil {
+					t.Errorf("%s.ToUnicode(%q) = %q, want error", p.name, in, got)
+				}
+			}
+		})
+	}
+
+	// Mapping profiles lower-case the input first, so an upper-case ACE
+	// prefix must be rejected as well.
+	for _, p := range profiles[1:3] { // Lookup, Display
+		for _, in := range []string{"XN--EXAMPLE-.com", "Xn--Example-.COM"} {
+			if got, err := p.profile.ToASCII(in); err == nil {
+				t.Errorf("%s.ToASCII(%q) = %q, want error", p.name, in, got)
+			}
+			if got, err := p.profile.ToUnicode(in); err == nil {
+				t.Errorf("%s.ToUnicode(%q) = %q, want error", p.name, in, got)
+			}
+		}
+	}
+
+	// Genuine Punycode labels must keep working.
+	for _, p := range profiles[:3] { // Punycode, Lookup, Display
+		const in, want = "www.xn--bcher-kva.de", "www.bücher.de"
+		if got, err := p.profile.ToUnicode(in); err != nil || got != want {
+			t.Errorf("%s.ToUnicode(%q) = %q, %v; want %q, nil", p.name, in, got, err, want)
+		}
+	}
+}
